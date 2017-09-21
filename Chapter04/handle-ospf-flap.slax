@@ -1,0 +1,67 @@
+version 1.0;
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+
+import "../import/junos.xsl";
+
+template set-ospf-interface-cost($interface, $comment) {
+    <configuration> {
+        <protocols> {
+            <ospf> {
+                <area> {
+                    <name> "0.0.0.0";
+                    <interface> {
+                        <junos:comment> $comment;
+                        <name> $interface;
+                        <metric> 65535;
+                    }
+                }
+            }
+        }
+    }
+}
+
+match / {
+	
+	<event-script-results> {
+
+        var $interface = event-script-input/trigger-event/attribute-list/attribute/value[../name=="interface-name"];
+        var $neighbor = event-script-input/trigger-event/attribute-list/attribute/value[../name=="neighbor-address"];
+
+        var $ospf-rpc = {
+            <get-ospf-interface-information> {
+                <detail>;
+                <interface-name> $interface;
+            }
+        }
+        var $result = jcs:invoke($ospf-rpc);
+
+        var $adj-count = $result/ospf-interface/adj-count;
+        var $cost = $result/ospf-interface/interface-cost;
+
+        if ($adj-count==0 && $cost!=65535) {
+
+            var $comment = "metric " _ $cost _ " changed to 65535 by handle-ospf-flap.xls on " _ $localtime _ " because of flapping neighbor " _ $neighbor;
+            var $message = "handle-ospf-flap.slax changed metric on interface " _ $interface _ " from " _ $cost _ " to 65535 because of neighbor " _ $neighbor;
+
+            var $connection = jcs:open();
+            var $configuration = call set-ospf-interface-cost($interface, $comment);
+            var $commit-options = {
+                    <commit-options> {
+                            <log> $message;
+                    }
+            };
+            var $config-result := { call jcs:load-configuration( $connection, $configuration, $commit-options ); }; 
+            expr jcs:close($connection);
+
+            if ($config-result//xnm:error ) {
+                expr jcs:syslog("user.err", "handle-ospf-flap.slax failed to poison interface " _ $interface _ " because: " _ $config-result//xnm:error/message);
+            } else {
+                expr jcs:syslog("user.info", $message);
+            }
+        }
+	}
+}
+

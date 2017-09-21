@@ -1,0 +1,64 @@
+version 1.0;
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+
+import "../import/junos.xsl";
+
+template disable-interface($interface, $comment) {
+    <configuration> {
+        <interfaces> {
+            <interface> {
+	        	<junos:comment> $comment;
+                <name> $interface;
+                <disable>;
+			}
+		}
+	}
+}
+
+match / {
+	
+	<event-script-results> {
+
+        var $interface = event-script-input/trigger-event/attribute-list/attribute/value[../name=="interface-name"];
+
+        var $get-config-rpc = {
+            <get-configuration database="committed" inherit="inherit"> {
+            	<configuration> {
+            		<interfaces> {
+            			<interface> {
+            				<name> $interface;
+            			}
+            		}
+            	}
+            }
+        }
+        var $result = jcs:invoke($get-config-rpc);
+
+        if (!jcs:empty($result/interfaces/interface[apply-macro/name=="DISABLE-ON-FLAP" && name==$interface])) {
+
+        	var $comment = "disabled by handle-link-flap.slax on " _ $localtime _ " because of flapping";
+        	var $message = "handle-link-flap.slax disabled interface " _ $interface;
+
+            var $connection = jcs:open();
+            var $configuration = call disable-interface($interface, $comment);
+            var $commit-options = {
+                    <commit-options> {
+                            <log> $message;
+                    }
+            };
+            var $config-result := { call jcs:load-configuration( $connection, $configuration, $commit-options ); }; 
+            expr jcs:close($connection);
+
+            if ($config-result//xnm:error ) {
+                expr jcs:syslog("user.err", "handle-link-flap.slax failed to disable interface " _ $interface _ " because: " _ $config-result//xnm:error/message);
+            } else {
+                expr jcs:syslog("user.info", $message);
+            }
+
+        }
+
+	}
+}

@@ -1,0 +1,20 @@
+version 1.0;
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+
+import "../import/junos.xsl";
+
+match / {
+	var $interface = event-script-input/trigger-event/attribute-list/attribute/value[../name=="interface-name"];
+	<event-script-result> {
+		var $rpc = {
+			<get-interface-information> {
+				<interface-name> $interface;
+			}
+		}
+		var $result = jcs:invoke($rpc);
+		copy-of $result;	
+	}
+}

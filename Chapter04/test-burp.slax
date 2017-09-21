@@ -1,0 +1,109 @@
+version 1.0;
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+
+import "../import/junos.xsl";
+
+param $nexthop="1.2.3.4";
+param $status="up";
+var $arguments = {
+    <argument> {
+        <name> "nexthop";
+        <description> "Nexthop to check";
+    }
+    <argument> {
+        <name> "status";
+        <description> "whether nexthop is up or down";
+    }
+}
+
+
+match / {
+	<op-script-results> {
+
+        var $get-config-rpc = {
+            <get-configuration> {
+            	<configuration> {
+            		<routing-options> {
+            			<static>;
+            		}
+            	}
+            }
+        }
+        var $result = jcs:invoke($get-config-rpc);
+
+		var $configuration := { apply-templates $result/routing-options/static; }
+
+		for-each ($configuration/configuration/routing-options/static/route/qualified-next-hop) {
+			<output> jcs:printf("Will %s static route for %s via %s", @inactive=="inactive"?"deactivate":"activate", ../name, name);
+		}
+
+		<output> jcs:printf("Configuration count: %s", count($configuration));
+		<output> jcs:printf("QNH count: %s", count($configuration/configuration/routing-options/static/route/qualified-next-hop));
+
+		if (count($configuration/configuration/routing-options/static/route/qualified-next-hop)>0) {
+			var $connection = jcs:open();
+			var $commit-options = {
+				<commit-options> {
+					if ($status=="up") {
+						<log> "Activating qualified-next-hop(s) with address: " _ $nexthop;			
+					}
+					if ($status=="down") {
+						<log> "De-activating qualified-next-hop(s) with address: " _ $nexthop;							
+					}
+				}
+			};
+			var $config-result := { call jcs:load-configuration( $connection, $configuration, $commit-options ); }; 
+			copy-of $config-result;
+			expr jcs:close($connection);
+		}
+	}
+}
+
+match route {
+	<configuration> {
+		<routing-options> {
+			<static> {
+				for-each (qualified-next-hop) {
+					if (name==$nexthop) {
+						if ($status=="up" && @inactive=="inactive") {
+							<route> {
+								<name> ../name;
+								<qualified-next-hop active="active"> {
+									<name> name;
+								}
+							}
+						}
+						if ($status=="down" && !@inactive=="inactive") {
+							<route> {
+								<name> ../name;
+								<qualified-next-hop inactive="inactive"> {
+									<name> name;
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+
+/* DEBUG VERSION
+match qualified-next-hop {
+
+	<output> jcs:printf("nexthop %s status %s", $nexthop, $status);
+	<output> jcs:printf("qualified-next-hop: %s via %s (%s)", ../name, name, @inactive=="inactive"?"inactive":"active");
+	if (name==$nexthop) {
+		if ($status=="up" && @inactive=="inactive") {
+			<output> jcs:printf("activating route %s via %s", ../name, name);
+		}
+		if ($status=="down" && !@inactive=="inactive") {
+			<output> jcs:printf("de-activating route %s via %s", ../name, name);		
+		}
+	}
+}
+*/

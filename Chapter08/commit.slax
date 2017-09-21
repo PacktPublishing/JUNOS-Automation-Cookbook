@@ -1,0 +1,82 @@
+version 1.0;
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+
+import "../import/junos.xsl";
+
+match configuration {
+
+
+	/* lo0.0 needs to exist and have address */
+	var $num_lo0_inets = count(interfaces/interface[name=="lo0"]/unit[name=="0"]/family/inet/address);
+	if ($num_lo0_inets==0) {
+		<xnm:error> {
+			<edit-path> "[edit interfaces lo0]";
+			<message> "interface must exist and have inet address";
+		}	
+	}
+
+	/* lo0.0 cannot be disabled */
+	var $num_lo0_disabled = count(interfaces/interface[name=="lo0"]/disable |
+		interfaces/interface[name=="lo0"]/unit[name=="0"]/disable);
+	if ($num_lo0_disabled!=0) {
+		<xnm:error> {
+			<edit-path> "[edit interfaces lo0]";
+			<message> "loopback interface nor unit 0 must not be disabled " _ $num_lo0_disabled;
+		}	
+	}
+
+
+	/* Ensure that all interfaces running OSPF with non-zero neighbor count are
+	 * still present in new candidate configuration
+	 */
+ 	var $candidate = .;
+	var $ospfrpc = {
+        <get-ospf-interface-information>;
+	}
+	var $ospfresult = jcs:invoke($ospfrpc);
+	for-each ($ospfresult/ospf-interface) {
+		var $if = jcs:split("\\.", interface-name);
+		var $nbrs = neighbor-count;
+		var $ifd = $if[1];
+		var $ifl = $if[2];
+		if (jcs:empty($candidate/interfaces/interface[name==$ifd]/unit[name==$ifl]) && $nbrs!=0) {
+			<xnm:error> {
+				<edit-path> "[edit interfaces " _ $ifd _ " unit " _ $ifl _ "]";
+				<message> "interface currently operating OSPF (non-zero neighbor count): deactivate OSPF before removing";
+			}	
+		}
+	}
+
+	var $isisrpc = {
+        <get-isis-interface-information> {
+        	<detail>;
+        }
+	}
+	var $isisresult = jcs:invoke($isisrpc);
+	for-each ($isisresult/isis-interface) {
+		var $if = jcs:split("\\.", interface-name);
+		var $adjs = interface-level-data[level=='2']/adjacency-count;
+		var $ifd = $if[1];
+		var $ifl = $if[2];
+		if (jcs:empty($candidate/interfaces/interface[name==$ifd]/unit[name==$ifl]) && $adjs!=0) {
+			<xnm:error> {
+				<edit-path> "[edit interfaces " _ $ifd _ " unit " _ $ifl _ "]";
+				<message> "interface currently operating ISIS (non-zero adjacency count) not present: deactivate ISIS before removing";
+			}	
+		}
+	}
+
+
+	/* BGP peers need to have an import policy */
+	for-each (protocols/bgp/group[type=="external"]/neighbor[count(import)==0 && count(../import)==0]) {
+		var $group = ../name;
+		var $peer = name;
+		<xnm:error> {
+			<edit-path> "[edit protocols bgp group " _ $group _ " neighbor " _ $peer _ "]";
+			<message> "EBGP peers must have an import policy - see RFC 8212";
+		}
+	}
+}

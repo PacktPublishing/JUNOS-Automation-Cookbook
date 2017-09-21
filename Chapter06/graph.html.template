@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>Test Graph</title>
+	<script type="text/javascript" src="vivagraph.js"></script>
+	<script type="text/javascript">
+
+		var json=${graph};
+
+		function main () {
+			var filter = new RegExp(window.location.search.slice(1));
+			var data = JSON.parse(json);
+			var graph = Viva.Graph.graph();
+
+			for (var n=0; n<data['nodes'].length; n++) {
+				if (filter!="" && data['nodes'][n].match(filter)) {
+					graph.addNode(data['nodes'][n]);					
+				}
+			}
+			for (var l=0; l<data['links'].length; l++) {
+				if (filter!="" && (data['links'][l][0].match(filter) || data['links'][l][1].match(filter))) {
+					graph.addLink(data['links'][l][0], data['links'][l][1], {metric:data['links'][l][2]});
+				}
+			}
+
+			var optimalSpringLength = 42;
+			var directedLayout = Viva.Graph.Layout.forceDirected(graph, {
+				springLength : optimalSpringLength,
+				// springCoeff : 0.0008,
+				// dragCoeff : 0.02,
+				// gravity : -1.2,
+				springTransform: function (link, spring) {
+					spring.length = Math.log(link.data.metric) * optimalSpringLength
+				}
+			});
+
+			var svgGraphics = Viva.Graph.View.svgGraphics();
+			var WIDTH = 180;
+			var HEIGHT = 32;
+
+			// Node placement hook
+			svgGraphics.node(function(node) {
+				var svg = Viva.Graph.svg('g');
+				if (node.id.startsWith("_")) {
+					var svgCircle = Viva.Graph.svg('circle').attr('r', "8").attr('stroke', "black").attr('fill', "white");
+					svg.append(svgCircle);
+				} else {
+					var svgText = Viva.Graph.svg('text').text(node.id).attr('y', "+16px").attr('font-family', "monospace");
+					var svgRect = Viva.Graph.svg('rect').attr('width', WIDTH).attr('height', HEIGHT).attr('fill', "cyan");
+					svg.append(svgRect);
+					svg.append(svgText);					
+				}
+				svg.addEventListener('click', function () {
+					directedLayout.pinNode(node, !directedLayout.isNodePinned(node));
+				});
+				return svg;
+			});
+			svgGraphics.placeNode(function(svg, pos) {
+				if (svg.firstChild.tagName=="rect") {
+	                svg.attr('transform', 'translate(' + (pos.x - WIDTH/2) + ',' + (pos.y - HEIGHT/2) +')');														
+				} else {
+	                svg.attr('transform', 'translate(' + (pos.x) + ',' + (pos.y) +')');														
+				}
+			});
+
+			var renderer = Viva.Graph.View.renderer(graph, { 
+				graphics: svgGraphics,
+				layout: directedLayout
+			});
+			renderer.run();
+		}
+	</script>
+
+	<style type="text/css" media="screen">
+		html, body, svg { width: 100%; height: 100%;}
+	</style>
+</head>
+
+<body onload='main()'>
+</body>
+</html>
+

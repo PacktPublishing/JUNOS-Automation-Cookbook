@@ -1,0 +1,47 @@
+version 1.0;
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+
+import "../import/junos.xsl";
+
+param $subnet="0/0";
+var $arguments = {
+    <argument> {
+        <name> "subnet";
+        <description> "Match subset of interfaces based upon subnet";
+    }
+}
+
+var $rpc = {
+	<get-interface-information>;
+}
+var $result = jcs:invoke($rpc);
+
+match / {
+	var $subnet-ip = jcs:parse-ip($subnet);
+	
+	<op-script-results> {
+		<output> {
+			expr jcs:printf("%10s %6s %16s %16s %s\n", "Interface", "Status", "Local IP Addr", "Subnet", "Description");
+		}
+		for-each ($result//ifa-local) {
+
+	        var $iplookup = {
+	            var $check = jcs:parse-ip(. _ "/" _ $subnet-ip[3]);
+	            if ($check[4]==$subnet-ip[4]) {
+	                    expr $check[4] _ "/" _ $check[3];
+	            }
+	        }
+
+	        if ($iplookup!="") {
+				<output> {
+					expr jcs:printf("%10s %6s %16s %16s %s\n",
+						../../../name, ../../../../oper-status, ., ../ifa-destination, ../../../description);
+				}	        
+	        }
+		}
+	}
+}
+

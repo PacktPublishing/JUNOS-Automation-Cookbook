@@ -1,0 +1,87 @@
+version 1.0;
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+
+import "../import/junos.xsl";
+
+match / {
+	
+	<event-script-results> {
+
+		/* get interface frome event */
+
+		/* verify if it runs OSPF  - check /protocols/ospf/interface
+
+		/* if it does 
+
+	}
+}
+
+/*
+
+adamc@router> help syslog SNMP_TRAP_LINK_DOWN 
+Name:          SNMP_TRAP_LINK_DOWN
+Message:       ifIndex <snmp-interface-index>, ifAdminStatus <admin-status>, ifOperStatus
+               <operational-status>, ifName <interface-name>
+Help:          linkDown trap was sent
+Description:   The SNMP agent process (snmpd) generated a linkDown trap because the
+               indicated interface changed state to 'down'.
+Type:          Event: This message reports an event, not an error
+Severity:      warning
+Facility:      LOG_DAEMON
+
+adamc@router> help syslog RPD_OSPF_NBRDOWN 
+Name:          RPD_OSPF_NBRDOWN
+Message:       OSPF neighbor <neighbor-address> (realm <realm-name> <interface-name> area
+               <area-id>i) state changed from <old-state> to <new-state> due to
+               <event-name> (event reason: <reason>)
+Help:          OSPF neighbor adjacency was terminated
+Description:   An OSPF adjacency with the indicated neighboring router was terminated.
+               The local router no longer exchanges routing information with, or directs
+               traffic to, the neighboring router.
+Type:          Event: This message reports an event, not an error
+Severity:      notice
+Facility:      LOG_DAEMON
+Action:        For more information, see KB19074.
+*/
+
+/*
+<rpc-reply xmlns:junos="http://xml.juniper.net/junos/15.1F6/junos">
+    <ospf-interface-information xmlns="http://xml.juniper.net/junos/15.1F6/junos-routing">
+        <ospf-interface>
+            <interface-name>em1.0</interface-name>
+            <ospf-interface-state>DR</ospf-interface-state>
+            <ospf-area>0.0.0.0</ospf-area>
+            <dr-id>10.0.201.201</dr-id>
+            <bdr-id>10.0.201.220</bdr-id>
+            <neighbor-count>1</neighbor-count>
+            <interface-type>LAN</interface-type>
+            <interface-address>10.0.211.201</interface-address>
+            <address-mask>255.255.255.0</address-mask>
+            <mtu>1500</mtu>
+            <interface-cost>10</interface-cost>
+            <dr-address>10.0.211.201</dr-address>
+            <bdr-address>10.0.211.220</bdr-address>
+            <router-priority>128</router-priority>
+            <adj-count>1</adj-count>
+            <hello-interval>10</hello-interval>
+            <dead-interval>40</dead-interval>
+            <retransmit-interval>5</retransmit-interval>
+            <ospf-stub-type>Not Stub</ospf-stub-type>
+            <authentication-type>None</authentication-type>
+            <ospf-interface-protection-type>None</ospf-interface-protection-type>
+            <ospf-interface-topology>
+                <ospf-topology-name>default</ospf-topology-name>
+                <ospf-topology-id>0</ospf-topology-id>
+                <ospf-topology-metric>10</ospf-topology-metric>
+            </ospf-interface-topology>
+        </ospf-interface>
+    </ospf-interface-information>
+    <cli>
+        <banner></banner>
+    </cli>
+</rpc-reply>
+*/
+

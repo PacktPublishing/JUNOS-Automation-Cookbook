@@ -1,0 +1,469 @@
+/*
+ * rpf-tool.slax, (c) Adam Chappell, Feb 2014.
+ *
+ * Junos "op" script to assess current committed configuration and provide
+ * recommendation on where a unicast RPF check can be applied in order to
+ * prevent address spoofing.
+ *
+ * Unrestricted use granted, without warranty.
+ *
+ * Logic is as follows:
+ *  - analyse configuration: interfaces, routing-instances, protocols
+ *  - exclude any interfaces participating in dynamic routing protocols: OSPF, ISIS, BGP
+ *    (we don't consider VRRP: it can't influence local routing table)
+ *  - exclude any interfaces matched by a custom user-provided function, see below
+ *  - output a summary table showing configuration status, and interfaces eligible
+ *  - if the operator elects to, through the "interface" and "mode" switches,
+ *    optionally apply/remove configuration
+ *
+ * Sample invocations:
+ * adamc@VirtualSRX> op rpf-tool
+ * adamc@VirtualSRX> op rpf-tool mode apply interface xe-1/1/1.0
+ * adamc@VirtualSRX> op rpf-tool
+ *
+ */
+ 
+ /* Junosscript/SLAX boiler-plate */
+version 1.0;
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+
+import "../import/junos.xsl";
+
+/*
+ * Site-specific exclusion policies can be included here. Add the test required to the
+ * if/then/else chain, and expr "Y" if your specific test demands an exclusion. Note that
+ * by default, the code will fall-through to an expr "N", so you don't need to deal with
+ * a negative test result, only a positive one.
+ *
+ * Some examples inlcuded:
+ * - don't put RPF on the loopback interface. (Haven't actually tried doing this but my Firefly
+ *   VM is spewing a load of 128.0.0.1 traffic across lo0.0 so I assume that would break).
+ *
+ * - don't put RPF on interfaces where we find a description - either on physical or logical
+ *   interface layer - containing the tag: { no-rpf }, eg.
+ *   description "CST 10M FOOB1/CPE/12345 X {no-rpf, if-acct} // Foobar Saunders and his Unix Entendres"
+ * 
+ * Material available for decision-making:
+ *  $physical: physical interface, without trailing .NNN identifier, eg. ge-0/0/0
+ *  $logical: logical interface, including .NNN identifier, eg. ge-0/0/0.100
+ *  $unit: the logical unit number
+ *  $desc: string as derived from logical, or failing that, physical interface.
+ *  $config: configuration node-set including: interfaces, routing-instances, protocols
+ *
+ * To extract details from the configuration node-set, use an XPath predicate, eg. see the
+ * DHCP or unnumbered interface clauses below
+ */
+template local-policy-exclusions($physical, $logical, $unit, $description, $currentConfiguration) {
+
+    /* No interfaces where the physical interface is "lo0" */
+    if ($physical == "lo0" || $physical == "fxp0") { 
+        expr "Y";
+
+    /* No interfaces that contain the magic description tag */
+    } else if (jcs:empty(jcs:regex("\\{.*no-rpf.*\\}", $description))==false) {
+        expr "Y";
+
+    /* No unnumbered interfaces: they might be hiding BGP that we didn't spot  */
+    } else if (jcs:empty($currentConfiguration/interfaces//family/inet/unnumbered-address[../../../name==$unit && ../../../../name==$physical])==false) {
+        expr "Y";
+
+    /* Example: No interfaces where we find DHCP in the configuration  */
+    } else if (jcs:empty($currentConfiguration/interfaces//family/inet/dhcp[../../../name==$unit && ../../../../name==$physical])==false) {
+        expr "Y";
+
+    /* Default behaviour: no exclusion */
+    } else {
+        expr "N";
+    }
+}
+
+/*
+ * Declare command line arguments
+ */
+param $interface="";
+param $mode="check";
+var $arguments = {
+    <argument> {
+        <name> "interface";
+        <description> "Operate on the nominated interface only";
+    }
+    <argument> {
+        <name> "mode";
+        <description> "check | apply | remove";
+    }
+}
+var $if = jcs:split("\\.", $interface);
+
+/*
+ * An XML request to get a portion of the committed configuration
+ * for analysis.
+ */
+var $rtf = {
+    <get-configuration database="committed"> {
+        <configuration> {
+            <interfaces>;
+            <routing-instances>;
+            <protocols>;
+        }
+    }
+}
+var $currentConfiguration = jcs:invoke($rtf);
+
+match / {
+    <op-script-results> {
+
+        /* If we're just checking, print a header to help readability
+         */
+        if ($mode=="check") {
+            expr jcs:output(jcs:printf("Interface RPF analysis/configuration tool"));
+            expr jcs:output(jcs:printf("   Flags: + eligible, - ineligible, * running, ! excluded"));
+            expr jcs:output(jcs:printf("%-1.1s %-14.14s %-12.12s %-24.24s %s",
+                " ", "Interface", "Instance", "Description", "Address/Config"));            
+        }
+
+        /* Create the new configuration based upon the mode parameter:
+         * "apply": means apply RPF check to scoped interfaces
+         * "remove": means remove RPF check from scoped interfaces
+         * "check": simply report on eligibility for RPF on scoped interfaces
+         */
+        var $configuration := {
+            <configuration> {
+                <interfaces> {
+
+                    /*
+                     * For each interface, extract the crucial configuration parameters
+                     * needed to make a judgement call on whether we can use RPF check.
+                     * Checks come down to whether we are likely to be learning dynamic
+                     * routing information on the interface.
+                     */
+
+                    for-each ($currentConfiguration/interfaces/interface/unit[../name==$if[1]][name==$if[2]]
+                                | $currentConfiguration/interfaces/interface/unit[$interface==""]) {
+
+                        var $physical = ../name;
+                        var $unit = name;
+                        var $logical = $physical _ "." _ $unit;
+                        var $description = jcs:first-of(description, ../description);
+                        var $instance = $currentConfiguration//routing-instances/instance/name[../interface/name==$logical];
+                        
+                        /*
+                         * Is RPF configured on the interface?
+                         */
+                        var $rpf = {
+                            if (count(family/inet/rpf-check)>0) { expr "Y"; }
+                            else { expr "N"; }
+                        }
+                        var $rpf6 = {
+                            if (count(family/inet6/rpf-check)>0) { expr "Y"; }
+                            else { expr "N"; }
+                        }
+
+                        /*
+                         * Is the interface configured for inet or inet6, and therefore potentially
+                         * in need of RPF checking?
+                         */
+                        var $inet = {
+                            if (count(family/inet)>0) { expr "Y"; }
+                            else { expr "N"; }
+                        }
+                        var $inet6 = {
+                            if (count(family/inet6)>0) { expr "Y"; }
+                            else { expr "N"; }
+                        }
+
+                        /*
+                         * Extract the Internet addresses in use for commentary later
+                         */
+                        var $address = {
+                            for-each (family/inet/address) {
+                                expr "inet " _ name _ " ";
+                            }
+                            for-each (family/inet6/address) {
+                                expr "inet6 " _ name _ " ";
+                            }
+                        }
+
+                        /*
+                         * Interior Gateway Protocols.
+                         *
+                         * If the interface is named within the protocols tree, assume
+                         * it's running a protocol, regardless of the current operational state
+                         * (operator may be running us during maintenance when interfaces/protocols
+                         * are down - we want to act on configuration intent, not actual observation of
+                         * current state).
+                         */
+                        var $ospf = {
+                            if (count($currentConfiguration//
+                                        protocols/
+                                        ospf//
+                                        interface/
+                                        name[.==$logical])>0) { expr "Y"; }
+                            else { expr "N"; }
+                        }
+                        var $ospf3 = {
+                            if (count($currentConfiguration//
+                                        protocols/
+                                        ospf3//
+                                        interface/
+                                        name[.==$logical])>0) { expr "Y"; }
+                            else { expr "N"; }
+                        }
+                        var $rip = {
+                            if (count($currentConfiguration//
+                                        protocols/
+                                        rip//
+                                        neighbor/
+                                        name[.==$logical])>0) { expr "Y"; }
+                            else { expr "N"; }                
+                        }
+                        var $ripng = {
+                            if (count($currentConfiguration//
+                                        protocols/
+                                        ripng//
+                                        neighbor/name[.==$logical])>0) { expr "Y"; }
+                            else { expr "N"; }                
+                        }
+                        var $isis = {
+                            if (count($currentConfiguration//
+                                        protocols/
+                                        isis//
+                                        interface/
+                                        name[.==$logical])>0) { expr "Y"; }
+                            else { expr "N"; }
+                        }
+                        var $ldp = {
+                            if (count($currentConfiguration//
+                                        protocols/
+                                        ldp//
+                                        interface/
+                                        name[.==$logical])>0) { expr "Y"; }
+                            else { expr "N"; }
+                        }
+
+                        /*
+                         * If we can find a BGP neighbour in the same subnet as any directly
+                         * connected interface subnet routes, assume we have EBGP, and thus interface
+                         * is a no-no. NB. This will cover standard EBGP TTL=1 customers and peers, but
+                         * IBGP sessions are assumed to dynamically
+                         * route via IGP/LDP-operating interfaces.
+                         * 
+                         * If you happen to be running using IBGP with statics, beware!
+                         */
+                        var $bgp-peers = {
+                        
+                            /*
+                             * Iterate through the addresses on the interfaces, then the peers in the
+                             * BGP confguration. For each peer, use the interface mask on the peer address
+                             * then compare string-wise with the interface network. If they match,
+                             * we assume the routing table would route the session via the interface and thus
+                             * the interface has BGP enabled.
+                             */
+                            for-each (family/inet/address | family/inet6/address) {
+                                var $addr = jcs:parse-ip(name);
+                                var $network = $addr[4];
+                                var $plen = $addr[3];
+
+                                for-each ($currentConfiguration/protocols/bgp//neighbor[jcs:empty($instance)] |
+                                    $currentConfiguration/routing-instances/instance//protocols/bgp//neighbor[../../../../name==$instance]) {
+                                    var $peer = {   /* check matching address families */
+                                        var $ip-peer = jcs:parse-ip(name);
+                                        if ($addr[2] == $ip-peer[2]) {
+                                            expr name _ "/" _ $plen;
+                                        }
+                                    }
+                                    if ($peer!="") {
+                                        var $ip-peer = jcs:parse-ip($peer);
+                                        if ($network==$ip-peer[4]) {
+                                            expr $peer _ " ";
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        var $bgp = {
+                            if ($bgp-peers!="") { expr "Y"; }
+                            else { expr "N"; }
+                        }
+
+                        /*
+                         * Apply local exclusion policies. This logic can be customised per-site, see
+                         * the local-policy-exclusions function at the top of the file.
+                         */
+                        var $exclude = {
+                            call local-policy-exclusions($physical, $logical, $unit, $description, $currentConfiguration);
+                        }
+
+                        /*
+                         * General indicator for display output and later decision making
+                         * for configuration generation.
+                         */
+                        var $flag = {
+
+                            /* IPv4 and IPv6 configured: are both running RPF? */
+                            if ($inet=="Y" && $inet6=="Y" && $rpf=="Y" && $rpf6=="Y") {
+                                expr "*";   /* running */
+                            /* IPv4 only configured: is it running RPF */
+                            } else if ($inet=="Y" && $inet6=="N" && $rpf=="Y") {
+                                expr "*";
+                            /* IPv6 only configured: is it running RPF */
+                            } else if ($inet=="N" && $inet6=="Y" && $rpf6=="Y") {
+                                expr "*";
+
+                            /* Otherwise, check whether a local policy exclusion applies */
+                            } else if ($exclude=="Y") {
+                                expr "!";
+
+                            /* If not, interface is eligible, if it is running IPv4 or IPv6, but
+                             * not any of the protocols...
+                             */
+                            } else if (($inet=="Y" || $inet6=="Y") &&
+                                $bgp=="N" && $ospf=="N" && $ospf3=="N" && $isis=="N" &&
+                                $rip=="N" && $ripng=="N" && $ldp=="N") {
+                                    expr "+";
+
+                            /* ... otherwise, it is not eligible */
+                            } else {
+                                expr "-";
+                            }
+                        }
+                        
+                        /*
+                         * Build up the commentary field describing the protocols
+                         */
+                        var $comment = {
+                            if ($bgp=="Y") { expr "BGP "; }
+                            if ($ospf=="Y") { expr "OSPF "; }
+                            if ($ospf3=="Y") { expr "OSPFv3 "; }
+                            if ($rip=="Y") { expr "RIP "; }
+                            if ($ripng=="Y") { expr "RIP-NG "; }
+                            if ($isis=="Y") { expr "IS-IS "; }
+                            if ($ldp=="Y") { expr "LDP "; }
+                        }
+
+                        /* Build up the necessary configuration stanzas if we're
+                         * in apply mode
+                         */
+                        if ($mode=="apply") {
+
+                             /* If the interface is eligible, apply RPF and report */
+                            if ($flag=="+") {
+                                <interface> {
+                                    <name> $physical;
+                                    <unit> {
+                                        <name> $unit;
+                                        if ($inet=="Y" && $rpf=="N") {
+                                            expr jcs:output("Applying RPF inet configuration to interface ", $logical);
+                                            <family> {
+                                                <inet> {
+                                                    <rpf-check>;
+                                                }
+                                            }
+                                        }
+                                        if ($inet6=="Y" && $rpf6=="N") {
+                                            expr jcs:output("Applying RPF inet6 configuration to interface ", $logical);
+                                            <family> {
+                                                <inet6> {
+                                                    <rpf-check>;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                            /* If the interface is not eligible, but we've been explicitly asked to
+                             * configure it, report on the reason why we cannot. There is no "-f" option.
+                             */
+                            } else if ($interface!="") {
+                                if ($flag=="!") {
+                                    expr jcs:output("Interface ", $logical, " specifically excluded by local-policy-exclusions");
+                                } else if ($flag=="-") {
+                                    expr jcs:output("Interface ", $logical, " not eligible for RPF configuration: ", $comment);
+                                } else if ($flag=="*") {
+                                    expr jcs:output("Interface ", $logical, " already includes RPF configuration");
+                                }
+                            }
+
+                        /* Build up the necessary configuration stanzas if we're
+                         * in remove mode
+                         */
+
+                        } else if ($mode=="remove") {
+                            if ($rpf=="Y" || $rpf6=="Y") {
+                                <interface> {
+                                    <name> $physical;
+                                    <unit> {
+                                        <name> $unit;
+                                        if ($rpf=="Y") {
+                                            expr jcs:output("Removing RPF inet configuration from interface ", $logical);
+                                            <family> {
+                                                <inet> {
+                                                    <rpf-check delete="delete">;
+                                                }
+                                            }
+                                        }
+                                        if ($rpf6=="Y") {
+                                            expr jcs:output("Removing RPF inet6 configuration from interface ", $logical);
+                                            <family> {
+                                                <inet6> {
+                                                    <rpf-check delete="delete">;
+                                                }
+                                            }                                        
+                                        }
+                                    } 
+                                }
+                            }                               
+                        } else {
+                            expr jcs:output( jcs:printf("%-1.1s %-14.14s %-12.12s %-24.24s %s%s",
+                                $flag, $logical, $instance, $description, $address, $comment));
+                        }
+                    }
+                }
+            }
+        }
+
+        if ($mode=="apply" || $mode=="remove") {
+
+            /* Total up the affected elements for reporting purposes */
+            var $numIf = count($configuration//interface);
+            var $numInet = count($configuration//inet);
+            var $numInet6 = count($configuration//inet6);
+
+            var $logmsg = {
+                if ($mode=="apply" && $interface=="") {
+                    expr "Apply RPF to all interfaces: " _ $numIf _ " interface(s) affected: " _ $numInet _ " inet, " _ $numInet6 _ " inet6";
+                }
+                else if ($mode=="remove" && $interface=="") {
+                    expr "Remove RPF from all interfaces: " _ $numIf _ " interface(s) affected: " _ $numInet _ " inet, " _ $numInet6 _ " inet6";
+                } else if ($mode=="apply" && $interface!="") {
+                    expr "Apply RPF to interface: " _ $interface _ ": " _ $numInet _ " inet, " _ $numInet6 _ " inet6";                    
+                } else if ($mode=="remove" && $interface!="") {
+                    expr "Remove RPF from interface: " _ $interface _ ": " _ $numInet _ " inet, " _ $numInet6 _ " inet6";                    
+                }
+            }
+
+            /* Prepare a commit message */
+            var $commit-options = {
+                <commit-options> {
+                    <log> $logmsg;
+                }
+            }
+
+            /* Output the same message to the operator, and if the configuration contains changes, 
+             * apply them
+             */
+            expr jcs:output($logmsg);
+            if ($numIf > 0) {
+                var $connection = jcs:open();
+                var $result := { call jcs:load-configuration( $connection, $configuration, $commit-options); }
+                copy-of $result;
+                expr jcs:close($connection);
+            } else {
+                expr jcs:output("No affected interfaces: configuration not applied");
+            }
+        }
+    }
+}

@@ -1,0 +1,116 @@
+version 1.0;
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+
+import "../import/junos.xsl";
+
+param $service-id="";
+param $interconnect="";
+param $wan-ip="";
+
+var $arguments = {
+    <argument> {
+        <name> "service-id";
+        <description> "Service identifier";
+    }
+    <argument> {
+        <name> "interconnect";
+        <description> "Interconnect identifier";
+    }
+    <argument> {
+        <name> "wan-ip";
+        <description> "WAN IP address";
+    }
+}
+
+/*
+ * Configuration template
+ */
+template configuration($interface, $unit, $wan-ip, $service-id) {
+	<configuration> {
+		<interfaces> {
+			<interface> {
+				<name> $interface;
+				<unit> {
+					<name> $unit;
+					<description> $service-id;
+					<vlan-id> $unit;
+					<family> {
+						<inet> {
+							<address> {
+								<name> $wan-ip;
+							}
+						}
+					}
+				}
+			}
+		}
+	}	
+}
+
+
+match / {
+
+	<op-script-results> {
+
+		if ($service-id=="") {
+			<xsl:message terminate="yes"> "Must specify service identifier string";
+		}
+		if ($interconnect=="") {
+			<xsl:message terminate="yes"> "Must specify interconnect identifier string";
+		}
+		if (count(jcs:regex("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+\\/[0-9]+$", $wan-ip))==0) {
+			<xsl:message terminate="yes"> "WAN IP must be in form A.B.C.D/E " _ $wan-ip;
+		}
+
+		var $config-rpc = {
+			<get-configuration>;
+		}
+		var $result = jcs:invoke($config-rpc);
+
+		/* Determine interface associated with interconnect */
+		var $interface = ($result/interfaces/interface/name[../apply-macro[name="PROVISION"]/data/value[../name=="interconnect-name"]==$interconnect])[1];
+		if (count($interface)==0) {
+			<xsl:message terminate="yes"> "No interface found for specified interconnect " _ $interconnect;
+		}
+
+		/* Get the allowed VLAN ranges and the next one */
+		var $min = number($result/interfaces/interface[name=$interface]/apply-macro[name=="PROVISION"]/data/value[../name=="first-id"]);
+		var $max = number($result/interfaces/interface[name=$interface]/apply-macro[name=="PROVISION"]/data/value[../name=="last-id"]);
+		var $last = number($result/interfaces/interface[name=$interface]/unit[position()==last()]/name);
+
+		if ($min<0 || $min>4094 || string($min)=="NaN") {
+			<xsl:message terminate="yes"> "VLAN interface range lower limit on interface " _ $interface _ " invalid - reconfigure first-id";		
+		}
+		if ($max<0 || $max>4094 || string($max)=="NaN") {
+			<xsl:message terminate="yes"> "VLAN interface range upper limit on interface " _ $interface _ " invalid - reconfigure last-id";		
+		}
+
+		var $next = {
+			if ($last<$min) { expr $min; }
+			else { expr $last + 1; }
+		}
+		if ($next > $max) {
+			<xsl:message terminate="yes"> "Exceeded VLAN interface range on interface " _ $interface;		
+		}
+
+		<output> "Interconnect ID " _ $interconnect _ " is on interface " _ $interface _ ": using ranges " _ $min _ "-" _ $max;
+		<output> "Configuring next available logical VLAN " _ $next _ " with IP address " _ $wan-ip;
+
+		/* Apply configuration */
+		var $connection = jcs:open();
+		var $configuration = call configuration($interface, $unit=$next, $wan-ip, $service-id);
+		var $commit-options = {
+			<commit-options> {
+				<synchronize>;
+				<log> "Configuring interface " _ $interface _ " unit " _ $next _ " with IP " _ $wan-ip _ " for service " _ $service-id;
+			}
+		};
+		var $config-result := { call jcs:load-configuration( $connection, $configuration, $commit-options ); }; 
+		copy-of $config-result;
+		expr jcs:close($connection);
+	}
+}
+

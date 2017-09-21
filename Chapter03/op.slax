@@ -1,0 +1,35 @@
+version 1.0;
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+
+import "../import/junos.xsl";
+
+var $rpc = {
+	<get-bgp-neighbor-information>;
+}
+var $result = jcs:invoke($rpc);
+
+match / {
+	<op-script-results> {
+		<output> {
+			expr jcs:printf("%16s %10s %10s %10s %20s\n", "Peer", "ASN", "InMsgs", "OutMsgs", "State/PfxRcvd");
+		}
+		for-each ($result//bgp-peer) {
+			<output> {
+				if (bgp-rib/name=="inet.0") {
+					if (peer-state=="Established") {
+						expr jcs:printf("%16s %10u %10u %10u %20u\n", peer-id, peer-as,
+							input-messages, output-messages,
+							bgp-rib[name=="inet.0"]/accepted-prefix-count);
+					} else {
+						expr jcs:printf("%16s %10u %10u %10u %20s\n", peer-address, peer-as,
+							input-messages, output-messages,
+							peer-state);
+					}				
+				}
+			}
+		}
+	}
+}

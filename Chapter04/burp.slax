@@ -1,0 +1,98 @@
+version 1.0;
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+
+import "../import/junos.xsl";
+
+match / {
+	<event-script-results> {
+
+		var $owner = event-script-input/
+									trigger-event/
+									attribute-list/
+									attribute/value[../name=="test-owner"];
+		var $nexthop = event-script-input/
+									trigger-event/
+									attribute-list/
+									attribute/value[../name=="test-name"];
+		var $event = event-script-input/trigger-event/id;
+
+		if ($owner=="BURP") {
+
+	        var $get-config-rpc = {
+	            <get-configuration> {
+	            	<configuration> {
+	            		<routing-options> {
+	            			<static>;
+	            		}
+	            	}
+	            }
+	        }
+	        var $result = jcs:invoke($get-config-rpc);
+
+	        var $configuration := {
+				<configuration> {
+					<routing-options> {
+						<static> {
+							for-each ($result//routing-options/
+															static/
+															route/
+															qualified-next-hop) {
+								if (name==$nexthop) {
+									if ($event=="PING_TEST_COMPLETED"
+													&& @inactive=="inactive") {
+										<route> {
+											<name> ../name;
+											<qualified-next-hop active="active"> {
+												<name> name;
+											}
+										}
+									}
+									if ($event=="PING_TEST_FAILED"
+													&& !@inactive=="inactive") {
+										<route> {
+											<name> ../name;
+											<qualified-next-hop inactive="inactive"> {
+												<name> name;
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+	    }
+
+			if (count($configuration/configuration/
+														routing-options/
+														static/
+														route/
+														qualified-next-hop)>0) {
+				var $connection = jcs:open();
+				var $commit-options = {
+					<commit-options> {
+						if ($event=="PING_TEST_COMPLETED") {
+							<log> "Activating NH(s) with address: " _ $nexthop;			
+						}
+						if ($event=="PING_TEST_FAILED") {
+							<log> "De-activating NH(s) with address: " _ $nexthop;							
+						}
+					}
+				};
+				var $config-result := { call jcs:load-configuration(
+						$connection, $configuration, $commit-options ); }; 
+				if ($config-result//xnm:error ) {
+                	expr jcs:syslog("user.err",
+                		"burp.slax failed to reconfigure static routes "
+                		_ "in response to "_ $event _ " for "
+                		_ $nexthop _ " because: "
+                		_ $config-result//xnm:error/message);
+            	}
+				expr jcs:close($connection);
+			}
+		}
+	}
+}
